@@ -5,13 +5,22 @@ import mediapipe as mp
 
 pygame.init()
 
+# -------------------- SETTINGS --------------------
+
 WIDTH, HEIGHT = 900, 600
+FPS = 60
+
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Hand-Controlled Platformer")
 clock = pygame.time.Clock()
 
-# Webcam and MediaPipe
+font = pygame.font.SysFont(None, 28)
+big_font = pygame.font.SysFont(None, 64)
+
+# -------------------- CAMERA --------------------
+
 cap = cv2.VideoCapture(0)
+
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
 
@@ -21,13 +30,7 @@ hands = mp_hands.Hands(
     min_tracking_confidence=0.6
 )
 
-# Player
-player = pygame.Rect(100, 450, 40, 50)
-velocity_y = 0
-speed = 5
-gravity = 0.6
-jump_power = -13
-on_ground = False
+# -------------------- LEVEL --------------------
 
 platforms = [
     pygame.Rect(0, 550, 900, 50),
@@ -35,190 +38,428 @@ platforms = [
     pygame.Rect(420, 350, 150, 20),
     pygame.Rect(650, 260, 150, 20),
 ]
-coins = [
-    pygame.Rect(260, 400, 20, 20),
-    pygame.Rect(470, 310, 20, 20),
-    pygame.Rect(700, 220, 20, 20),
-]
 
-score = 0
-font = pygame.font.SysFont(None, 28)
-running = True
+# -------------------- GAME STATE --------------------
 
-# Track jump gesture transitions
-jump_frames = 0
-release_frames = 0
-jump_cooldown = 0
-jump_latched = False
+def create_coins():
+    return [
+        pygame.Rect(260, 400, 20, 20),
+        pygame.Rect(470, 310, 20, 20),
+        pygame.Rect(700, 220, 20, 20),
+    ]
 
+
+def create_enemies():
+    return [
+        {
+            "rect": pygame.Rect(280, 410, 30, 30),
+            "left": 220,
+            "right": 330,
+            "speed": 2
+        },
+        {
+            "rect": pygame.Rect(480, 320, 30, 30),
+            "left": 430,
+            "right": 540,
+            "speed": 2
+        },
+    ]
+
+
+def reset_game():
+    global player, velocity_y, on_ground
+    global coins, enemies, score, lives
+    global game_over, invulnerability
+    global jump_frames, release_frames
+    global jump_cooldown, jump_latched
+
+    player = pygame.Rect(100, 500, 40, 50)
+    velocity_y = 0
+    on_ground = False
+
+    coins = create_coins()
+    enemies = create_enemies()
+
+    score = 0
+    lives = 3
+    game_over = False
+    invulnerability = 0
+
+    jump_frames = 0
+    release_frames = 0
+    jump_cooldown = 0
+    jump_latched = False
+
+
+reset_game()
+
+# Jump settings
 JUMP_CONFIRM_FRAMES = 4
 JUMP_RELEASE_FRAMES = 5
 JUMP_COOLDOWN_FRAMES = 15
 
-while running:
-    clock.tick(60)
+gravity = 0.6
+jump_power = -13
+player_speed = 5
 
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
+running = True
 
-    # Read webcam frame
-    success, frame = cap.read()
+# -------------------- MAIN LOOP --------------------
 
-    hand_x = None
-    index_up = False
+try:
+    while running:
+        clock.tick(FPS)
 
-    if success:
-        frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+        # Events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
 
-        if results.multi_hand_landmarks:
-            hand = results.multi_hand_landmarks[0]
-            mp_draw.draw_landmarks(
-                frame, hand, mp_hands.HAND_CONNECTIONS
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+
+                if event.key == pygame.K_r and game_over:
+                    reset_game()
+
+        keys = pygame.key.get_pressed()
+
+        # -------------------- HAND TRACKING --------------------
+
+        hand_x = None
+        index_up = False
+
+        success, frame = cap.read()
+
+        if success:
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
+
+            if results.multi_hand_landmarks:
+                hand = results.multi_hand_landmarks[0]
+
+                mp_draw.draw_landmarks(
+                    frame,
+                    hand,
+                    mp_hands.HAND_CONNECTIONS
+                )
+
+                # Index fingertip controls horizontal movement
+                hand_x = hand.landmark[8].x
+
+                # Detect raised index finger
+                index_tip = hand.landmark[8]
+                index_joint = hand.landmark[6]
+
+                middle_tip = hand.landmark[12]
+                middle_joint = hand.landmark[10]
+
+                ring_tip = hand.landmark[16]
+                ring_joint = hand.landmark[14]
+
+                pinky_tip = hand.landmark[20]
+                pinky_joint = hand.landmark[18]
+
+                index_up = (
+                    index_tip.y < index_joint.y
+                    and middle_tip.y > middle_joint.y
+                    and ring_tip.y > ring_joint.y
+                    and pinky_tip.y > pinky_joint.y
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Index: {hand_x:.2f}",
+                    (20, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2
+                )
+
+            else:
+                cv2.putText(
+                    frame,
+                    "No hand detected",
+                    (20, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    2
+                )
+
+            cv2.imshow("Hand Tracking - Press Q to close game", frame)
+
+        # Keyboard fallback if no hand is detected
+        if not game_over:
+            if hand_x is not None:
+                target_x = int(hand_x * WIDTH) - player.width // 2
+                player.x += int((target_x - player.x) * 0.2)
+            else:
+                if keys[pygame.K_LEFT]:
+                    player.x -= player_speed
+
+                if keys[pygame.K_RIGHT]:
+                    player.x += player_speed
+
+            player.left = max(0, player.left)
+            player.right = min(WIDTH, player.right)
+
+            # -------------------- JUMP CONTROL --------------------
+
+            if jump_cooldown > 0:
+                jump_cooldown -= 1
+
+            if index_up:
+                jump_frames += 1
+                release_frames = 0
+            else:
+                jump_frames = 0
+                release_frames += 1
+
+            if release_frames >= JUMP_RELEASE_FRAMES:
+                jump_latched = False
+
+            if (
+                jump_frames >= JUMP_CONFIRM_FRAMES
+                and not jump_latched
+                and jump_cooldown == 0
+                and on_ground
+            ):
+                velocity_y = jump_power
+                on_ground = False
+                jump_latched = True
+                jump_cooldown = JUMP_COOLDOWN_FRAMES
+
+            # Keyboard jump
+            if keys[pygame.K_SPACE] and on_ground:
+                velocity_y = jump_power
+                on_ground = False
+
+            # -------------------- PHYSICS --------------------
+
+            old_bottom = player.bottom
+
+            velocity_y += gravity
+            player.y += round(velocity_y)
+
+            on_ground = False
+
+            # Land on platforms when falling
+            if velocity_y >= 0:
+                for platform in platforms:
+                    if (
+                        player.right > platform.left
+                        and player.left < platform.right
+                        and old_bottom <= platform.top
+                        and player.bottom >= platform.top
+                    ):
+                        player.bottom = platform.top
+                        velocity_y = 0
+                        on_ground = True
+                        break
+
+            # -------------------- COINS --------------------
+
+            for coin in coins[:]:
+                if player.colliderect(coin):
+                    coins.remove(coin)
+                    score += 1
+
+            # -------------------- INVULNERABILITY --------------------
+
+            if invulnerability > 0:
+                invulnerability -= 1
+
+            # -------------------- ENEMIES --------------------
+
+            for enemy in enemies:
+                enemy_rect = enemy["rect"]
+
+                enemy_rect.x += enemy["speed"]
+
+                if enemy_rect.left <= enemy["left"]:
+                    enemy_rect.left = enemy["left"]
+                    enemy["speed"] = abs(enemy["speed"])
+
+                if enemy_rect.right >= enemy["right"]:
+                    enemy_rect.right = enemy["right"]
+                    enemy["speed"] = -abs(enemy["speed"])
+
+                if (
+                    player.colliderect(enemy_rect)
+                    and invulnerability == 0
+                ):
+                    lives -= 1
+
+                    player.x = 100
+                    player.y = 500
+                    velocity_y = 0
+                    on_ground = False
+
+                    invulnerability = 90
+
+                    if lives <= 0:
+                        game_over = True
+
+                    break
+
+            # Falling off the screen costs a life
+            if player.top > HEIGHT and invulnerability == 0:
+                lives -= 1
+
+                player.x = 100
+                player.y = 500
+                velocity_y = 0
+                on_ground = False
+
+                invulnerability = 90
+
+                if lives <= 0:
+                    game_over = True
+
+        # -------------------- DRAW GAME --------------------
+
+        screen.fill((25, 30, 55))
+
+        # Platforms
+        for platform in platforms:
+            pygame.draw.rect(
+                screen,
+                (80, 200, 130),
+                platform,
+                border_radius=4
             )
 
-            # Use index fingertip for horizontal control
-            tip = hand.landmark[8]
-            hand_x = tip.x
-
-            # Detect index finger raised, other fingers folded
-            index_tip = hand.landmark[8]
-            index_joint = hand.landmark[6]
-            middle_tip = hand.landmark[12]
-            middle_joint = hand.landmark[10]
-            ring_tip = hand.landmark[16]
-            ring_joint = hand.landmark[14]
-            pinky_tip = hand.landmark[20]
-            pinky_joint = hand.landmark[18]
-
-            index_up = (
-                index_tip.y < index_joint.y
-                and middle_tip.y > middle_joint.y
-                and ring_tip.y > ring_joint.y
-                and pinky_tip.y > pinky_joint.y
+        # Coins
+        for coin in coins:
+            pygame.draw.circle(
+                screen,
+                (255, 215, 0),
+                coin.center,
+                10
+            )
+            pygame.draw.circle(
+                screen,
+                (255, 245, 150),
+                coin.center,
+                5
             )
 
-        cv2.imshow("Hand Camera", frame)
+        # Enemies
+        for enemy in enemies:
+            rect = enemy["rect"]
 
-    # Keyboard fallback
-    keys = pygame.key.get_pressed()
-    moving = False
+            pygame.draw.rect(
+                screen,
+                (230, 65, 75),
+                rect,
+                border_radius=6
+            )
 
-    if hand_x is not None:
-        # Map camera position to game screen
-        target_x = int(hand_x * WIDTH) - player.width // 2
-        player.x += int((target_x - player.x) * 0.2)
-        moving = True
-    else:
-        if keys[pygame.K_LEFT]:
-            player.x -= speed
-        if keys[pygame.K_RIGHT]:
-            player.x += speed
+            pygame.draw.circle(
+                screen,
+                (255, 255, 255),
+                (rect.x + 9, rect.y + 10),
+                4
+            )
+            pygame.draw.circle(
+                screen,
+                (255, 255, 255),
+                (rect.x + 22, rect.y + 10),
+                4
+            )
 
-    # Jump on the gesture's rising edge
-        
-    # Stabilize jump gesture
-    if jump_cooldown > 0:
-        jump_cooldown -= 1
+        # Player with blinking during invulnerability
+        if invulnerability == 0 or invulnerability % 10 < 5:
+            pygame.draw.rect(
+                screen,
+                (255, 190, 70),
+                player,
+                border_radius=8
+            )
 
-    if index_up:
-        jump_frames += 1
-        release_frames = 0
-    else:
-        jump_frames = 0
-        release_frames += 1
+            pygame.draw.circle(
+                screen,
+                (30, 30, 45),
+                (player.x + 12, player.y + 14),
+                3
+            )
+            pygame.draw.circle(
+                screen,
+                (30, 30, 45),
+                (player.x + 28, player.y + 14),
+                3
+            )
 
-    # Unlock jumping only after the gesture is released
-    if release_frames >= JUMP_RELEASE_FRAMES:
-        jump_latched = False
-
-    # Jump after the gesture is detected consistently
-    if (
-        jump_frames >= JUMP_CONFIRM_FRAMES
-        and not jump_latched
-        and jump_cooldown == 0
-        and on_ground
-    ):
-        velocity_y = jump_power
-        on_ground = False
-        jump_latched = True
-        jump_cooldown = JUMP_COOLDOWN_FRAMES
-
-    # Keyboard jump fallback
-    if keys[pygame.K_SPACE] and on_ground:
-        velocity_y = jump_power
-        on_ground = False
-
-    # Keyboard jump fallback
-    if keys[pygame.K_SPACE] and on_ground:
-        velocity_y = jump_power
-        on_ground = False
-
-    # Gravity and vertical movement
-    velocity_y += gravity
-    player.y += int(velocity_y)
-
-    # Platform collision when falling
-    on_ground = False
-
-    for platform in platforms:
-        if (
-            player.colliderect(platform)
-            and velocity_y >= 0
-            and player.bottom - velocity_y <= platform.top + 2
-        ):
-            player.bottom = platform.top
-            velocity_y = 0
-            on_ground = True
-
-    player.left = max(0, min(player.left, WIDTH - player.width))
-
-    if player.top > HEIGHT:
-        player.x = 100
-        player.y = 450
-        velocity_y = 0
-    # Collect coins
-    for coin in coins[:]:
-        if player.colliderect(coin):
-            coins.remove(coin)
-            score += 1
-    # Draw game
-    screen.fill((25, 30, 55))
-
-    for platform in platforms:
-        pygame.draw.rect(screen, (80, 200, 130), platform)
-    # Draw coins
-    for coin in coins:
-        pygame.draw.circle(
-            screen,
-            (255, 215, 0),
-            coin.center,
-            10
+        # HUD
+        screen.blit(
+            font.render(
+                "Move hand: Move | Raise index: Jump",
+                True,
+                (255, 255, 255)
+            ),
+            (20, 20)
         )
 
-    pygame.draw.rect(screen, (255, 190, 70), player)
+        screen.blit(
+            font.render(
+                f"Coins: {score}/3",
+                True,
+                (255, 215, 0)
+            ),
+            (20, 55)
+        )
 
-    instructions = font.render(
-        "Move hand: Move | Raise index finger: Jump | Space: Jump",
-        True, (255, 255, 255)
-    )
-    score_text = font.render(
-        f"Coins: {score}/{3}",
-        True,
-        (255, 215, 0)
-    )
-    screen.blit(score_text, (20, 90))
-    screen.blit(instructions, (20, 20))
+        screen.blit(
+            font.render(
+                f"Lives: {lives}",
+                True,
+                (255, 100, 100)
+            ),
+            (20, 90)
+        )
 
-    status = "Hand detected" if hand_x is not None else "No hand - use arrow keys"
-    screen.blit(font.render(status, True, (255, 255, 255)), (20, 55))
+        # Game over overlay
+        if game_over:
+            overlay = pygame.Surface(
+                (WIDTH, HEIGHT),
+                pygame.SRCALPHA
+            )
+            overlay.fill((0, 0, 0, 190))
+            screen.blit(overlay, (0, 0))
 
-    pygame.display.flip()
+            title = big_font.render(
+                "GAME OVER",
+                True,
+                (255, 80, 80)
+            )
 
-# Cleanup
-cap.release()
-hands.close()
-cv2.destroyAllWindows()
-pygame.quit()
+            restart_text = font.render(
+                "Press R to restart | ESC to quit",
+                True,
+                (255, 255, 255)
+            )
+
+            screen.blit(
+                title,
+                title.get_rect(
+                    center=(WIDTH // 2, HEIGHT // 2 - 30)
+                )
+            )
+
+            screen.blit(
+                restart_text,
+                restart_text.get_rect(
+                    center=(WIDTH // 2, HEIGHT // 2 + 30)
+                )
+            )
+
+        pygame.display.flip()
+
+finally:
+    cap.release()
+    hands.close()
+    cv2.destroyAllWindows()
+    pygame.quit()
