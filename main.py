@@ -1,13 +1,25 @@
 
 import pygame
+import cv2
+import mediapipe as mp
 
 pygame.init()
 
 WIDTH, HEIGHT = 900, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Hand-Controlled Platformer")
-
 clock = pygame.time.Clock()
+
+# Webcam and MediaPipe
+cap = cv2.VideoCapture(0)
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+hands = mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6
+)
 
 # Player
 player = pygame.Rect(100, 450, 40, 50)
@@ -17,7 +29,6 @@ gravity = 0.6
 jump_power = -13
 on_ground = False
 
-# Platforms
 platforms = [
     pygame.Rect(0, 550, 900, 50),
     pygame.Rect(200, 440, 150, 20),
@@ -25,7 +36,11 @@ platforms = [
     pygame.Rect(650, 260, 150, 20),
 ]
 
+font = pygame.font.SysFont(None, 28)
 running = True
+
+# Track jump gesture transitions
+was_index_up = False
 
 while running:
     clock.tick(60)
@@ -34,43 +49,98 @@ while running:
         if event.type == pygame.QUIT:
             running = False
 
+    # Read webcam frame
+    success, frame = cap.read()
+
+    hand_x = None
+    index_up = False
+
+    if success:
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb)
+
+        if results.multi_hand_landmarks:
+            hand = results.multi_hand_landmarks[0]
+            mp_draw.draw_landmarks(
+                frame, hand, mp_hands.HAND_CONNECTIONS
+            )
+
+            # Use index fingertip for horizontal control
+            tip = hand.landmark[8]
+            hand_x = tip.x
+
+            # Detect index finger raised, other fingers folded
+            index_tip = hand.landmark[8]
+            index_joint = hand.landmark[6]
+            middle_tip = hand.landmark[12]
+            middle_joint = hand.landmark[10]
+            ring_tip = hand.landmark[16]
+            ring_joint = hand.landmark[14]
+            pinky_tip = hand.landmark[20]
+            pinky_joint = hand.landmark[18]
+
+            index_up = (
+                index_tip.y < index_joint.y
+                and middle_tip.y > middle_joint.y
+                and ring_tip.y > ring_joint.y
+                and pinky_tip.y > pinky_joint.y
+            )
+
+        cv2.imshow("Hand Camera", frame)
+
+    # Keyboard fallback
     keys = pygame.key.get_pressed()
+    moving = False
 
-    # Horizontal movement
-    if keys[pygame.K_LEFT]:
-        player.x -= speed
-    if keys[pygame.K_RIGHT]:
-        player.x += speed
+    if hand_x is not None:
+        # Map camera position to game screen
+        target_x = int(hand_x * WIDTH) - player.width // 2
+        player.x += int((target_x - player.x) * 0.2)
+        moving = True
+    else:
+        if keys[pygame.K_LEFT]:
+            player.x -= speed
+        if keys[pygame.K_RIGHT]:
+            player.x += speed
 
-    # Jump
+    # Jump on the gesture's rising edge
+    if index_up and not was_index_up and on_ground:
+        velocity_y = jump_power
+        on_ground = False
+
+    was_index_up = index_up
+
+    # Keyboard jump fallback
     if keys[pygame.K_SPACE] and on_ground:
         velocity_y = jump_power
         on_ground = False
 
-    # Gravity
+    # Gravity and vertical movement
     velocity_y += gravity
     player.y += int(velocity_y)
 
-    # Platform collision
+    # Platform collision when falling
     on_ground = False
 
     for platform in platforms:
-        if player.colliderect(platform) and velocity_y >= 0:
-            if player.bottom - velocity_y <= platform.top + 2:
-                player.bottom = platform.top
-                velocity_y = 0
-                on_ground = True
+        if (
+            player.colliderect(platform)
+            and velocity_y >= 0
+            and player.bottom - velocity_y <= platform.top + 2
+        ):
+            player.bottom = platform.top
+            velocity_y = 0
+            on_ground = True
 
-    # Screen boundaries
-    player.left = max(0, player.left)
-    player.right = min(WIDTH, player.right)
+    player.left = max(0, min(player.left, WIDTH - player.width))
 
     if player.top > HEIGHT:
         player.x = 100
         player.y = 450
         velocity_y = 0
 
-    # Draw
+    # Draw game
     screen.fill((25, 30, 55))
 
     for platform in platforms:
@@ -78,14 +148,19 @@ while running:
 
     pygame.draw.rect(screen, (255, 190, 70), player)
 
-    font = pygame.font.SysFont(None, 28)
-    text = font.render(
-        "Arrow keys: Move | Space: Jump",
-        True,
-        (255, 255, 255)
+    instructions = font.render(
+        "Move hand: Move | Raise index finger: Jump | Space: Jump",
+        True, (255, 255, 255)
     )
-    screen.blit(text, (20, 20))
+    screen.blit(instructions, (20, 20))
+
+    status = "Hand detected" if hand_x is not None else "No hand - use arrow keys"
+    screen.blit(font.render(status, True, (255, 255, 255)), (20, 55))
 
     pygame.display.flip()
 
+# Cleanup
+cap.release()
+hands.close()
+cv2.destroyAllWindows()
 pygame.quit()
