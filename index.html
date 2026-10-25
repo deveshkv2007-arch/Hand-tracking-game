@@ -1,0 +1,564 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HandQuest | Gesture Platformer</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: #101426;
+    color: white;
+    font-family: system-ui, sans-serif;
+    text-align: center;
+}
+
+header { padding: 20px 12px 8px; }
+h1 { margin: 0; color: #ffc857; letter-spacing: 2px; }
+header p, #status, .hint { color: #aeb8d5; }
+
+main { width: min(960px, 96%); margin: auto; }
+
+.hud {
+    display: flex;
+    justify-content: space-around;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 12px;
+    background: #202844;
+    border-radius: 12px 12px 0 0;
+}
+
+canvas {
+    width: 100%;
+    display: block;
+    background: #18223e;
+    border-radius: 0 0 12px 12px;
+}
+
+.controls {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 16px;
+}
+
+button {
+    border: 0;
+    border-radius: 9px;
+    padding: 12px 20px;
+    background: #ffc857;
+    color: #15182a;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.secondary { background: #303c60; color: white; }
+
+.camera-box { width: min(360px, 90%); margin: 0 auto 24px; }
+
+video {
+    width: 100%;
+    border-radius: 12px;
+    transform: scaleX(-1);
+    background: #080b14;
+}
+
+.hint { font-size: 14px; line-height: 1.6; }
+</style>
+</head>
+
+<body>
+<header>
+    <h1>HANDQUEST</h1>
+    <p>A platformer you control with your hand.</p>
+</header>
+
+<main>
+    <div class="hud">
+        <span>🪙 Coins: <b id="score">0</b></span>
+        <span>❤️ Lives: <b id="lives">3</b></span>
+        <span id="gesture">Gesture: No hand</span>
+    </div>
+
+    <canvas id="game" width="900" height="500"></canvas>
+
+    <div class="controls">
+        <button id="cameraButton">Enable Camera</button>
+        <button id="startButton">Start Game</button>
+        <button id="restartButton" class="secondary">Restart</button>
+    </div>
+
+    <p id="status">Enable your camera, then start playing.</p>
+
+    <div class="camera-box">
+        <video id="video" autoplay playsinline muted></video>
+    </div>
+
+    <p class="hint">
+        Move your hand left/right from the centre to move.<br>
+        Raise your index finger and fold the other fingers to jump.<br>
+        Keyboard: A/D or ←/→ to move, Space to jump.
+    </p>
+</main>
+
+<script type="module">
+import {
+    HandLandmarker,
+    FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const video = document.getElementById("video");
+
+const statusText = document.getElementById("status");
+const scoreText = document.getElementById("score");
+const livesText = document.getElementById("lives");
+const gestureText = document.getElementById("gesture");
+
+const W = canvas.width;
+const H = canvas.height;
+const WORLD = 3000;
+
+let landmarker = null;
+let cameraOn = false;
+let running = false;
+let lastVideoTime = -1;
+
+let keys = {};
+let handX = null;
+let smoothHandX = null;
+let indexUp = false;
+let previousIndexUp = false;
+let cameraX = 0;
+let lastTime = 0;
+let invulnerability = 0;
+let jumpBuffer = 0;
+let win = false;
+
+const platforms = [
+    [0,450,600,50],
+    [700,450,400,50],
+    [1200,450,500,50],
+    [1800,450,400,50],
+    [2300,450,700,50],
+    [250,350,150,18],
+    [480,280,150,18],
+    [760,340,150,18],
+    [1000,260,150,18],
+    [1300,340,150,18],
+    [1500,250,150,18],
+    [1850,350,150,18],
+    [2050,270,150,18],
+    [2400,340,150,18],
+    [2650,250,150,18]
+].map(([x,y,w,h]) => ({x,y,w,h}));
+
+const coinPositions = [
+    [300,315],[530,245],[800,305],[1050,225],
+    [1350,305],[1550,215],[1900,315],[2100,235],
+    [2450,305],[2700,215]
+];
+
+const enemyPositions = [
+    [350,420,350,500,2],
+    [800,420,800,1000,3],
+    [1350,420,1350,1600,2],
+    [1900,420,1900,2150,3],
+    [2450,420,2450,2850,2]
+];
+
+let player, coins, enemies, score, lives, gameOver;
+
+function resetGame() {
+    player = {
+        x: 80, y: 400, w: 32, h: 42,
+        vy: 0, grounded: false
+    };
+
+    coins = coinPositions.map(([x,y]) => ({
+        x, y, taken: false
+    }));
+
+    enemies = enemyPositions.map(([x,y,left,right,speed]) => ({
+        x, y, w: 28, h: 30, left, right, speed
+    }));
+
+    score = 0;
+    lives = 3;
+    gameOver = false;
+    win = false;
+    invulnerability = 0;
+    cameraX = 0;
+    jumpBuffer = 0;
+    previousIndexUp = false;
+    smoothHandX = null;
+
+    updateHUD();
+}
+
+function updateHUD() {
+    scoreText.textContent = score;
+    livesText.textContent = lives;
+}
+
+function overlaps(a,b) {
+    return a.x < b.x+b.w &&
+           a.x+a.w > b.x &&
+           a.y < b.y+b.h &&
+           a.y+a.h > b.y;
+}
+
+function jump() {
+    if (player.grounded && !gameOver && !win) {
+        player.vy = -720;
+        player.grounded = false;
+        jumpBuffer = 0;
+        return true;
+    }
+    return false;
+}
+
+function loseLife() {
+    if (invulnerability > 0 || gameOver || win) return;
+
+    lives--;
+
+    player.x = Math.min(WORLD - 100, Math.max(80, cameraX + 80));
+    player.y = 400;
+    player.vy = 0;
+    player.grounded = false;
+
+    invulnerability = 1.5;
+
+    if (lives <= 0) gameOver = true;
+    updateHUD();
+}
+
+function detectGesture() {
+    if (!landmarker || video.readyState < 2) return;
+
+    if (video.currentTime === lastVideoTime) return;
+    lastVideoTime = video.currentTime;
+
+    const result = landmarker.detectForVideo(video, performance.now());
+
+    handX = null;
+    indexUp = false;
+
+    if (result.landmarks.length > 0) {
+        const p = result.landmarks[0];
+
+        // Use the wrist/palm area to control horizontal movement.
+        // Mirroring matches the preview shown to the player.
+        const rawX = 1 - p[9].x;
+
+        if (smoothHandX === null) {
+            smoothHandX = rawX;
+        } else {
+            smoothHandX += (rawX - smoothHandX) * 0.35;
+        }
+
+        handX = smoothHandX;
+
+        // Raised index finger; other three fingers folded.
+        const indexRaised = p[8].y < p[6].y - 0.015;
+        const middleFolded = p[12].y > p[10].y + 0.015;
+        const ringFolded = p[16].y > p[14].y + 0.015;
+        const pinkyFolded = p[20].y > p[18].y + 0.015;
+
+        indexUp =
+            indexRaised &&
+            middleFolded &&
+            ringFolded &&
+            pinkyFolded;
+
+        gestureText.textContent = indexUp
+            ? "Gesture: JUMP"
+            : "Gesture: MOVE";
+    } else {
+        // Do not keep using a stale hand position.
+        handX = null;
+        smoothHandX = null;
+        indexUp = false;
+        gestureText.textContent = "Gesture: No hand";
+    }
+}
+
+function update(dt) {
+    if (!running || gameOver || win) return;
+
+    invulnerability = Math.max(0, invulnerability - dt);
+
+    // Movement is relative to the centre of the camera.
+    // Holding your hand near the centre stops horizontal movement.
+    let direction = 0;
+
+    if (handX !== null) {
+        const offset = handX - 0.5;
+        const deadZone = 0.10;
+
+        if (offset < -deadZone) {
+            direction = -Math.min(1, (-offset - deadZone) / 0.25);
+        } else if (offset > deadZone) {
+            direction = Math.min(1, (offset - deadZone) / 0.25);
+        }
+    } else {
+        if (keys.ArrowLeft || keys.a || keys.A) direction -= 1;
+        if (keys.ArrowRight || keys.d || keys.D) direction += 1;
+        direction = Math.max(-1, Math.min(1, direction));
+    }
+
+    player.x += direction * 300 * dt;
+    player.x = Math.max(0, Math.min(WORLD-player.w, player.x));
+
+    // Trigger a jump only when the gesture changes from off to on.
+    // Release the gesture before attempting another camera jump.
+    if (indexUp && !previousIndexUp) {
+        jumpBuffer = 0.15;
+    }
+    previousIndexUp = indexUp;
+
+    if (keys.jumpPressed) {
+        jumpBuffer = 0.15;
+        keys.jumpPressed = false;
+    }
+
+    jumpBuffer = Math.max(0, jumpBuffer - dt);
+
+    if (jumpBuffer > 0 && player.grounded) {
+        jump();
+    }
+
+    const oldBottom = player.y + player.h;
+    const oldY = player.y;
+
+    player.vy += 1800 * dt;
+    player.y += player.vy * dt;
+    player.grounded = false;
+
+    // Land only when falling onto a platform from above.
+    if (player.vy >= 0) {
+        for (const p of platforms) {
+            const horizontal =
+                player.x + player.w > p.x &&
+                player.x < p.x + p.w;
+
+            if (horizontal &&
+                oldBottom <= p.y &&
+                player.y + player.h >= p.y) {
+                player.y = p.y - player.h;
+                player.vy = 0;
+                player.grounded = true;
+            }
+        }
+    }
+
+    for (const c of coins) {
+        if (!c.taken && overlaps(player,
+            {x:c.x-9,y:c.y-9,w:18,h:18})) {
+            c.taken = true;
+            score++;
+            updateHUD();
+        }
+    }
+
+    for (const e of enemies) {
+        e.x += e.speed * 60 * dt;
+
+        if (e.x < e.left) {
+            e.x = e.left;
+            e.speed = Math.abs(e.speed);
+        }
+
+        if (e.x + e.w > e.right) {
+            e.x = e.right - e.w;
+            e.speed = -Math.abs(e.speed);
+        }
+
+        if (overlaps(player,e)) loseLife();
+    }
+
+    if (player.y > H + 100) loseLife();
+
+    // Keep the player toward the left-centre as the world scrolls.
+    cameraX = Math.max(0, Math.min(
+        player.x - W * 0.4, WORLD - W
+    ));
+
+    if (player.x >= WORLD - player.w - 30) win = true;
+}
+
+function draw() {
+    ctx.fillStyle = "#18223e";
+    ctx.fillRect(0,0,W,H);
+
+    // Background stars
+    ctx.fillStyle = "#293451";
+    for (let x=0; x<W; x+=80) {
+        ctx.fillRect(x, 70 + (x%3)*20, 3, 3);
+    }
+
+    // Platforms
+    for (const p of platforms) {
+        ctx.fillStyle = "#50c878";
+        ctx.fillRect(p.x-cameraX,p.y,p.w,p.h);
+    }
+
+    // Coins
+    for (const c of coins) {
+        if (c.taken) continue;
+
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath();
+        ctx.arc(c.x-cameraX,c.y,9,0,Math.PI*2);
+        ctx.fill();
+    }
+
+    // Enemies
+    for (const e of enemies) {
+        ctx.fillStyle = "#e64b5d";
+        ctx.fillRect(e.x-cameraX,e.y,e.w,e.h);
+        ctx.fillStyle = "white";
+        ctx.fillRect(e.x-cameraX+5,e.y+7,5,5);
+        ctx.fillRect(e.x-cameraX+18,e.y+7,5,5);
+    }
+
+    // Player
+    if (invulnerability <= 0 ||
+        Math.floor(invulnerability*10)%2 === 0) {
+        ctx.fillStyle = "#ffc857";
+        ctx.fillRect(player.x-cameraX,player.y,player.w,player.h);
+
+        ctx.fillStyle = "#15182a";
+        ctx.fillRect(player.x-cameraX+7,player.y+10,4,4);
+        ctx.fillRect(player.x-cameraX+21,player.y+10,4,4);
+    }
+
+    // Finish marker
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(WORLD-70-cameraX,300,5,150);
+    ctx.fillStyle = "#ffc857";
+    ctx.fillRect(WORLD-65-cameraX,300,35,25);
+
+    if (gameOver || win) {
+        ctx.fillStyle = "rgba(0,0,0,0.75)";
+        ctx.fillRect(0,0,W,H);
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = win ? "#ffd700" : "#ff6677";
+        ctx.font = "bold 48px system-ui";
+        ctx.fillText(win ? "LEVEL COMPLETE!" : "GAME OVER", W/2,H/2);
+
+        ctx.fillStyle = "white";
+        ctx.font = "20px system-ui";
+        ctx.fillText("Press Restart to play again",W/2,H/2+40);
+    }
+}
+
+function loop(time) {
+    const dt = Math.min((time-lastTime)/1000 || 0, 0.033);
+    lastTime = time;
+
+    detectGesture();
+    update(dt);
+    draw();
+
+    requestAnimationFrame(loop);
+}
+
+// Enable camera and load the hand-tracking model.
+document.getElementById("cameraButton").onclick = async () => {
+    try {
+        statusText.textContent = "Loading hand tracking model...";
+
+        if (!landmarker) {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm"
+            );
+
+            const modelOptions = {
+                baseOptions: {
+                    modelAssetPath:
+                    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+                },
+                runningMode: "VIDEO",
+                numHands: 1
+            };
+
+            try {
+                landmarker = await HandLandmarker.createFromOptions(
+                    vision,
+                    { ...modelOptions, baseOptions: {
+                        ...modelOptions.baseOptions,
+                        delegate: "GPU"
+                    }}
+                );
+            } catch {
+                // CPU fallback for browsers/devices without GPU support.
+                landmarker = await HandLandmarker.createFromOptions(
+                    vision, modelOptions
+                );
+            }
+        }
+
+        if (!cameraOn) {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "user" },
+                audio: false
+            });
+
+            video.srcObject = stream;
+            await video.play();
+            cameraOn = true;
+        }
+
+        statusText.textContent =
+            "Camera ready. Keep your hand visible and move it from the centre.";
+    } catch (error) {
+        console.error(error);
+        statusText.textContent =
+            "Could not start camera/model. Allow camera access and use localhost or HTTPS.";
+    }
+};
+
+document.getElementById("startButton").onclick = () => {
+    running = true;
+    statusText.textContent = cameraOn
+        ? "Playing! Move your hand left or right from the centre."
+        : "Keyboard mode: A/D or arrows to move, Space to jump.";
+};
+
+document.getElementById("restartButton").onclick = () => {
+    resetGame();
+    running = true;
+    statusText.textContent = "Game restarted.";
+};
+
+window.addEventListener("keydown", e => {
+    if (["ArrowLeft","ArrowRight"," "].includes(e.key)) {
+        e.preventDefault();
+    }
+
+    if (e.key === " " && !keys[" "]) {
+        keys.jumpPressed = true;
+    }
+
+    keys[e.key] = true;
+});
+
+window.addEventListener("keyup", e => {
+    keys[e.key] = false;
+});
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
