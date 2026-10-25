@@ -35,12 +35,25 @@ platforms = [
     pygame.Rect(420, 350, 150, 20),
     pygame.Rect(650, 260, 150, 20),
 ]
+coins = [
+    pygame.Rect(260, 400, 20, 20),
+    pygame.Rect(470, 310, 20, 20),
+    pygame.Rect(700, 220, 20, 20),
+]
 
+score = 0
 font = pygame.font.SysFont(None, 28)
 running = True
 
 # Track jump gesture transitions
-was_index_up = False
+jump_frames = 0
+release_frames = 0
+jump_cooldown = 0
+jump_latched = False
+
+JUMP_CONFIRM_FRAMES = 4
+JUMP_RELEASE_FRAMES = 5
+JUMP_COOLDOWN_FRAMES = 15
 
 while running:
     clock.tick(60)
@@ -105,11 +118,38 @@ while running:
             player.x += speed
 
     # Jump on the gesture's rising edge
-    if index_up and not was_index_up and on_ground:
+        
+    # Stabilize jump gesture
+    if jump_cooldown > 0:
+        jump_cooldown -= 1
+
+    if index_up:
+        jump_frames += 1
+        release_frames = 0
+    else:
+        jump_frames = 0
+        release_frames += 1
+
+    # Unlock jumping only after the gesture is released
+    if release_frames >= JUMP_RELEASE_FRAMES:
+        jump_latched = False
+
+    # Jump after the gesture is detected consistently
+    if (
+        jump_frames >= JUMP_CONFIRM_FRAMES
+        and not jump_latched
+        and jump_cooldown == 0
+        and on_ground
+    ):
         velocity_y = jump_power
         on_ground = False
+        jump_latched = True
+        jump_cooldown = JUMP_COOLDOWN_FRAMES
 
-    was_index_up = index_up
+    # Keyboard jump fallback
+    if keys[pygame.K_SPACE] and on_ground:
+        velocity_y = jump_power
+        on_ground = False
 
     # Keyboard jump fallback
     if keys[pygame.K_SPACE] and on_ground:
@@ -139,12 +179,24 @@ while running:
         player.x = 100
         player.y = 450
         velocity_y = 0
-
+    # Collect coins
+    for coin in coins[:]:
+        if player.colliderect(coin):
+            coins.remove(coin)
+            score += 1
     # Draw game
     screen.fill((25, 30, 55))
 
     for platform in platforms:
         pygame.draw.rect(screen, (80, 200, 130), platform)
+    # Draw coins
+    for coin in coins:
+        pygame.draw.circle(
+            screen,
+            (255, 215, 0),
+            coin.center,
+            10
+        )
 
     pygame.draw.rect(screen, (255, 190, 70), player)
 
@@ -152,6 +204,12 @@ while running:
         "Move hand: Move | Raise index finger: Jump | Space: Jump",
         True, (255, 255, 255)
     )
+    score_text = font.render(
+        f"Coins: {score}/{3}",
+        True,
+        (255, 215, 0)
+    )
+    screen.blit(score_text, (20, 90))
     screen.blit(instructions, (20, 20))
 
     status = "Hand detected" if hand_x is not None else "No hand - use arrow keys"
